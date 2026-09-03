@@ -24,6 +24,10 @@ BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 SHEET_ID = os.environ["GOOGLE_SHEET_ID"]
 GOOGLE_JSON = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]
 
+# твой Telegram ID
+ADMIN_TELEGRAM_ID = 128835770
+
+# максимальное количество участников
 MAX_PARTICIPANTS = 64
 
 
@@ -43,6 +47,10 @@ SUCCESS_MESSAGE = (
 
 LIMIT_MESSAGE = (
     "регистрация завершена — все 64 места уже заняты."
+)
+
+TOO_LONG_NICKNAME_MESSAGE = (
+    "ник слишком длинный. максимум 100 символов."
 )
 
 
@@ -104,6 +112,14 @@ def load_registered_users():
 
 
 # =========================
+# проверка администратора
+# =========================
+
+def is_admin(user_id):
+    return user_id == ADMIN_TELEGRAM_ID
+
+
+# =========================
 # команда /start
 # =========================
 
@@ -113,12 +129,19 @@ async def start(
 ):
     user = update.effective_user
 
-    # если пользователь уже зарегистрирован —
-    # полностью игнорируем его
+    # администратор может регистрироваться
+    # сколько угодно раз
+    if is_admin(user.id):
+        context.user_data["waiting_for_nickname"] = True
+
+        await update.message.reply_text(WELCOME_MESSAGE)
+        return
+
+    # обычный пользователь уже зарегистрирован
     if user.id in registered_users:
         return
 
-    # если все места заняты
+    # проверяем лимит для обычных участников
     if len(registered_users) >= MAX_PARTICIPANTS:
         await update.message.reply_text(LIMIT_MESSAGE)
         return
@@ -139,9 +162,9 @@ async def receive_nickname(
 ):
     user = update.effective_user
 
-    # если пользователь уже зарегистрирован —
-    # ничего не делаем
-    if user.id in registered_users:
+    # если пользователь уже зарегистрирован
+    # и это не администратор — игнорируем
+    if user.id in registered_users and not is_admin(user.id):
         return
 
     # если бот сейчас не ждет ник
@@ -157,21 +180,25 @@ async def receive_nickname(
     # ограничение длины ника
     if len(nickname) > 100:
         await update.message.reply_text(
-            "ник слишком длинный. максимум 100 символов."
+            TOO_LONG_NICKNAME_MESSAGE
         )
         return
 
     # блокируем регистрацию,
-    # чтобы одновременно не зарегистрировалось
-    # больше 64 человек
+    # чтобы при одновременных сообщениях
+    # не получилось больше 64 участников
     async with registration_lock:
 
-        # повторная проверка
-        if user.id in registered_users:
+        # для обычного пользователя проверяем,
+        # не зарегистрировался ли он уже
+        if user.id in registered_users and not is_admin(user.id):
             return
 
-        # проверяем лимит непосредственно перед записью
-        if len(registered_users) >= MAX_PARTICIPANTS:
+        # лимит действует только на обычных участников
+        if (
+            not is_admin(user.id)
+            and len(registered_users) >= MAX_PARTICIPANTS
+        ):
             context.user_data["waiting_for_nickname"] = False
 
             await update.message.reply_text(LIMIT_MESSAGE)
@@ -208,17 +235,18 @@ async def receive_nickname(
             registration_date,
         ]
 
-        # записываем пользователя в таблицу
+        # добавляем регистрацию в google sheets
         await asyncio.to_thread(
             sheet.append_row,
             row,
             value_input_option="USER_ENTERED"
         )
 
-        # добавляем пользователя в список зарегистрированных
-        registered_users.add(user.id)
+        # обычного пользователя запоминаем
+        if not is_admin(user.id):
+            registered_users.add(user.id)
 
-        # больше ничего от него не ждем
+        # больше ничего не ждем
         context.user_data["waiting_for_nickname"] = False
 
     # подтверждение регистрации
