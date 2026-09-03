@@ -17,26 +17,37 @@ from telegram.ext import (
 
 
 # =========================
-# НАСТРОЙКИ
+# настройки
 # =========================
 
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 SHEET_ID = os.environ["GOOGLE_SHEET_ID"]
 GOOGLE_JSON = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]
 
+MAX_PARTICIPANTS = 64
+
+
+# =========================
+# сообщения
+# =========================
+
 WELCOME_MESSAGE = (
-    "Добро пожаловать на Кубок лагеря!\n\n"
-    "Напиши ниже ник, под которым ты будешь участвовать в турнире."
+    "добро пожаловать на кубок лагеря!\n\n"
+    "напиши ниже ник, под которым ты будешь участвовать в турнире."
 )
 
 SUCCESS_MESSAGE = (
-    "Ты зарегистрирован! Ждем тебя в 12:00 на главной сцене! "
-    "Не опаздывай!"
+    "ты зарегистрирован! ждем тебя в 12:00 на главной сцене! "
+    "не опаздывай!"
+)
+
+LIMIT_MESSAGE = (
+    "регистрация завершена — все 64 места уже заняты."
 )
 
 
 # =========================
-# GOOGLE SHEETS
+# подключение к google sheets
 # =========================
 
 def connect_to_sheet():
@@ -60,23 +71,19 @@ def connect_to_sheet():
 sheet = connect_to_sheet()
 
 
-# Здесь храним ID уже зарегистрированных людей
+# =========================
+# зарегистрированные пользователи
+# =========================
+
 registered_users = set()
 
-# Защита от одновременных регистраций
 registration_lock = asyncio.Lock()
 
 
 def load_registered_users():
-    """
-    При запуске читаем таблицу и запоминаем,
-    кто уже зарегистрирован.
-    """
-
     try:
         rows = sheet.get_all_values()
 
-        # Первая строка — заголовки
         for row in rows[1:]:
             if len(row) >= 4:
                 telegram_id = row[3].strip()
@@ -88,77 +95,96 @@ def load_registered_users():
                         pass
 
         print(
-            f"Загружено зарегистрированных пользователей: "
+            f"загружено зарегистрированных пользователей: "
             f"{len(registered_users)}"
         )
 
     except Exception as error:
-        print(f"Ошибка загрузки таблицы: {error}")
+        print(f"ошибка загрузки таблицы: {error}")
 
 
 # =========================
-# /START
+# команда /start
 # =========================
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
     user = update.effective_user
 
-    # Если уже регистрировался — ничего не отвечаем
+    # если пользователь уже зарегистрирован —
+    # полностью игнорируем его
     if user.id in registered_users:
         return
 
-    # Запоминаем, что сейчас ждём ник
+    # если все места заняты
+    if len(registered_users) >= MAX_PARTICIPANTS:
+        await update.message.reply_text(LIMIT_MESSAGE)
+        return
+
+    # ждем ник
     context.user_data["waiting_for_nickname"] = True
 
     await update.message.reply_text(WELCOME_MESSAGE)
 
 
 # =========================
-# ПОЛУЧЕНИЕ НИКА
+# получение ника
 # =========================
 
 async def receive_nickname(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
-
     user = update.effective_user
 
-    # Уже зарегистрирован — полностью игнорируем
+    # если пользователь уже зарегистрирован —
+    # ничего не делаем
     if user.id in registered_users:
         return
 
-    # Мы не просили этого пользователя вводить ник
+    # если бот сейчас не ждет ник
     if not context.user_data.get("waiting_for_nickname"):
         return
 
     nickname = update.message.text.strip()
 
+    # пустой ник
     if not nickname:
         return
 
-    # Ограничиваем длину ника
+    # ограничение длины ника
     if len(nickname) > 100:
         await update.message.reply_text(
-            "Ник слишком длинный. Максимум 100 символов."
+            "ник слишком длинный. максимум 100 символов."
         )
         return
 
+    # блокируем регистрацию,
+    # чтобы одновременно не зарегистрировалось
+    # больше 64 человек
     async with registration_lock:
 
-        # Проверяем ещё раз на случай
-        # двух быстрых сообщений подряд
+        # повторная проверка
         if user.id in registered_users:
             return
 
-        # Telegram username
-        if user.username:
-            telegram_username = "@" + user.username
-        else:
-            telegram_username = ""
+        # проверяем лимит непосредственно перед записью
+        if len(registered_users) >= MAX_PARTICIPANTS:
+            context.user_data["waiting_for_nickname"] = False
 
-        # Имя + фамилия Telegram
+            await update.message.reply_text(LIMIT_MESSAGE)
+            return
+
+        # telegram username
+        telegram_username = (
+            "@" + user.username
+            if user.username
+            else ""
+        )
+
+        # имя пользователя telegram
         telegram_name = " ".join(
             part
             for part in [
@@ -168,12 +194,12 @@ async def receive_nickname(
             if part
         )
 
-        # Время регистрации
+        # дата регистрации
         registration_date = datetime.now().strftime(
             "%d.%m.%Y %H:%M:%S"
         )
 
-        # Строка для Google Sheets
+        # строка для google sheets
         row = [
             telegram_username,
             telegram_name,
@@ -182,45 +208,46 @@ async def receive_nickname(
             registration_date,
         ]
 
-        # Записываем в таблицу
+        # записываем пользователя в таблицу
         await asyncio.to_thread(
             sheet.append_row,
             row,
             value_input_option="USER_ENTERED"
         )
 
-        # Помечаем пользователя зарегистрированным
+        # добавляем пользователя в список зарегистрированных
         registered_users.add(user.id)
 
+        # больше ничего от него не ждем
         context.user_data["waiting_for_nickname"] = False
 
-    # Отправляем подтверждение
+    # подтверждение регистрации
     await update.message.reply_text(SUCCESS_MESSAGE)
 
 
 # =========================
-# ЗАПУСК
+# запуск бота
 # =========================
 
 def main():
+    print("запускаем бота...")
 
-    print("Запускаем бота...")
-
-    # Загружаем уже существующие регистрации
+    # загружаем уже зарегистрированных пользователей
     load_registered_users()
 
+    # создаем приложение telegram
     application = (
         Application.builder()
         .token(BOT_TOKEN)
         .build()
     )
 
-    # Команда /start
+    # команда /start
     application.add_handler(
         CommandHandler("start", start)
     )
 
-    # Обычные текстовые сообщения
+    # обычные текстовые сообщения
     application.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
@@ -228,8 +255,9 @@ def main():
         )
     )
 
-    print("Бот запущен!")
+    print("бот запущен!")
 
+    # запускаем бота
     application.run_polling()
 
 
